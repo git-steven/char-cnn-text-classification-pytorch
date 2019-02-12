@@ -16,7 +16,7 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 
 parser = argparse.ArgumentParser(description='Character level CNN text classifier training')
-# data 
+# data
 parser.add_argument('--train_path', metavar='DIR',
                     help='path to training data csv', default='data/ag_news_csv/train.csv')
 parser.add_argument('--val_path', metavar='DIR',
@@ -59,16 +59,21 @@ experiment.add_argument('--save_interval', type=int, default=1, help='how many e
 
 
 def train(train_loader, dev_loader, model, args):
-  
 
     # optimization scheme
+    optimizer = None
     if args.optimizer=='Adam':
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    elif args.optimizer=='SGD':
-        optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
     elif args.optimizer=='ASGD':
         optimizer = torch.optim.ASGD(model.parameters(), lr=args.lr)
-    
+    else:#if args.optimizer=='SGD':
+        optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
+
+    # dynamic learning scheme
+    if args.dynamic_lr and args.optimizer!='Adam':
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.milestones, gamma=args.decay_factor, last_epoch=-1)
+        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=10, threshold=1e-3)
+
     # continue training from checkpoint model
     if args.continue_from:
         print("=> loading checkpoint from '{}'".format(args.continue_from))
@@ -88,11 +93,6 @@ def train(train_loader, dev_loader, model, args):
         start_epoch = 1
         start_iter = 1
         best_acc = None
-    
-    # dynamic learning scheme
-    if args.dynamic_lr and args.optimizer!='Adam':
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.milestones, gamma=args.decay_factor, last_epoch=-1)
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=10, threshold=1e-3)
 
     # multi-gpu
     if args.cuda:
@@ -105,9 +105,9 @@ def train(train_loader, dev_loader, model, args):
         if args.dynamic_lr and args.optimizer!='Adam':
             scheduler.step()
         for i_batch, data in enumerate(train_loader, start=start_iter):
-            inputs, target = data          
+            inputs, target = data
             target.sub_(1)
-        
+
             if args.cuda:
                 inputs, target = inputs.cuda(), target.cuda()
 
@@ -117,7 +117,7 @@ def train(train_loader, dev_loader, model, args):
             loss = F.nll_loss(logit, target)
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm(model.parameters(), args.max_norm)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_norm)
             optimizer.step()
 
             if args.cuda:
@@ -128,19 +128,20 @@ def train(train_loader, dev_loader, model, args):
                 print(torch.cat((target.unsqueeze(1), torch.unsqueeze(torch.max(logit, 1)[1].view(target.size()).data, 1)), 1))
                 print('\nLogit')
                 print(logit)
-            
+
             if i_batch % args.log_interval == 0:
                 corrects = (torch.max(logit, 1)[1].view(target.size()).data == target.data).sum()
                 accuracy = 100.0 * corrects/args.batch_size
                 print('Epoch[{}] Batch[{}] - loss: {:.6f}  lr: {:.5f}  acc: {:.3f}% ({}/{})'.format(epoch,
                                                                              i_batch,
-                                                                             loss.data[0],
+                                                                             #loss.data[0],
+                                                                             loss.data.item(),#[0],
                                                                              optimizer.state_dict()['param_groups'][0]['lr'],
                                                                              accuracy,
                                                                              corrects,
                                                                              args.batch_size))
             if i_batch % args.val_interval == 0:
-  
+
                 val_loss, val_acc = eval(dev_loader, model, epoch, i_batch, optimizer, args)
 
             i_batch += 1
@@ -158,9 +159,9 @@ def train(train_loader, dev_loader, model, args):
         if best_acc is None or val_acc > best_acc:
             file_path = '%s/CharCNN_best.pth.tar' % (args.save_folder)
             print("\r=> found better validated model, saving to %s" % file_path)
-            save_checkpoint(model, 
+            save_checkpoint(model,
                             {'epoch': epoch,
-                            'optimizer' : optimizer.state_dict(), 
+                            'optimizer' : optimizer.state_dict(),
                             'best_acc': best_acc},
                             file_path)
             best_acc = val_acc
@@ -173,38 +174,41 @@ def eval(data_loader, model, epoch_train, batch_train, optimizer, args):
     for i_batch, (data) in enumerate(data_loader):
         inputs, target = data
         target.sub_(1)
-        
+
         size+=len(target)
         if args.cuda:
             inputs, target = inputs.cuda(), target.cuda()
 
-        inputs = Variable(inputs, volatile=True)
+        with torch.no_grad():
+            inputs = Variable(inputs)
         target = Variable(target)
         logit = model(inputs)
         predicates = torch.max(logit, 1)[1].view(target.size()).data
-        accumulated_loss += F.nll_loss(logit, target, size_average=False).data[0]
+        #accumulated_loss += F.nll_loss(logit, target, size_average=False).data[0]
+        loss_info = F.nll_loss(logit, target, reduction="mean")
+        accumulated_loss += loss_info.data.item()
         corrects += (torch.max(logit, 1)[1].view(target.size()).data == target.data).sum()
         predicates_all+=predicates.cpu().numpy().tolist()
         target_all+=target.data.cpu().numpy().tolist()
         if args.cuda:
             torch.cuda.synchronize()
-        
+
     avg_loss = accumulated_loss/size
     accuracy = 100.0 * corrects/size
     model.train()
-    print('\nEvaluation - loss: {:.6f}  lr: {:.5f}  acc: {:.3f}% ({}/{}) '.format(avg_loss, 
+    print('\nEvaluation - loss: {:.6f}  lr: {:.5f}  acc: {:.3f}% ({}/{}) '.format(avg_loss,
                                                                        optimizer.state_dict()['param_groups'][0]['lr'],
                                                                        accuracy,
-                                                                       corrects, 
+                                                                       corrects,
                                                                        size))
     print_f_score(predicates_all, target_all)
     print('\n')
     if args.log_result:
         with open(os.path.join(args.save_folder,'result.csv'), 'a') as r:
-            r.write('\n{:d},{:d},{:.5f},{:.2f},{:f}'.format(epoch_train, 
-                                                            batch_train, 
-                                                            avg_loss, 
-                                                            accuracy, 
+            r.write('\n{:d},{:d},{:.5f},{:.2f},{:f}'.format(epoch_train,
+                                                            batch_train,
+                                                            avg_loss,
+                                                            accuracy,
                                                             optimizer.state_dict()['param_groups'][0]['lr']))
 
     return avg_loss, accuracy
@@ -224,7 +228,7 @@ def main():
     train_dataset = AGNEWs(label_data_path=args.train_path, alphabet_path=args.alphabet_path)
     print("Transferring training data into iterator...")
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, shuffle=True)
-    
+
     # feature length
     args.num_features = len(train_dataset.alphabet)
 
@@ -236,7 +240,7 @@ def main():
 
     class_weight, num_class_train = train_dataset.get_class_weight()
     _, num_class_dev = dev_dataset.get_class_weight()
-    
+
     # when you have an unbalanced training set
     if args.class_weight!=None:
         args.class_weight = torch.FloatTensor(class_weight).sqrt_()
@@ -273,9 +277,9 @@ def main():
     # model
     model = CharCNN(args)
     print(model)
-    
-            
-    # train 
+
+
+    # train
     train(train_loader, dev_loader, model, args)
 
 if __name__ == '__main__':
