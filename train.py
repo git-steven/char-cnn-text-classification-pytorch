@@ -70,9 +70,10 @@ def train(train_loader, dev_loader, model, args):
         optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
 
     # dynamic learning scheme
-    if args.dynamic_lr and args.optimizer!='Adam':
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.milestones, gamma=args.decay_factor, last_epoch=-1)
+    if args.dynamic_lr: #and args.optimizer!='Adam':
+        # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.milestones, gamma=args.decay_factor, last_epoch=-1)
         # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=10, threshold=1e-3)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     # continue training from checkpoint model
     if args.continue_from:
@@ -102,7 +103,7 @@ def train(train_loader, dev_loader, model, args):
     model.train()
 
     for epoch in range(start_epoch, args.epochs+1):
-        if args.dynamic_lr and args.optimizer!='Adam':
+        if args.dynamic_lr: #and args.optimizer!='Adam':
             scheduler.step()
         for i_batch, data in enumerate(train_loader, start=start_iter):
             inputs, target = data
